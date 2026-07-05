@@ -16,8 +16,9 @@ There are two filled areas and two dashed lines:
 - **Loudness envelope** (muted blue-grey) — your **realtime** listening level (dBA
   Leq), moment to moment, on its own scale. This is the raw "how loud right now".
 - **Dose area / curve** (teal fill, coloured line) — your **accumulated** daily
-  noise dose. It climbs while you listen and recovers during quiet. The line
-  shifts colour as it rises: green → lime → amber → orange/red.
+  noise dose. It climbs while you listen and recovers during quiet. The whole
+  line is a single colour set by your *current* dose, stepping green → lime →
+  amber → orange/red as that dose rises (and back down as it recovers).
 - **Two dashed horizontal lines** — the dose thresholds, on the *dose* scale.
   The lower **yellow** line is `prewarn_at` (default **80%**) and the upper
   **red** line is `warn_at` (default **100%** = a full safe daily dose). They're
