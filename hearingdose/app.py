@@ -34,7 +34,7 @@ APP_DIR = os.path.dirname(BASE)
 INI_PATH = os.path.join(APP_DIR, "HearingDose.ini")
 STATE_PATH = os.path.join(APP_DIR, "HearingDose.state.json")
 
-# palette (matches SafeTimeWidget's zones)
+# palette
 BORDER = "#26323A"
 PANEL = "#121A1E"
 PANEL2 = "#0C1215"

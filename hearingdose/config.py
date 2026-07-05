@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Settings: a commented .ini next to the app, same pattern as SafeTimeWidget."""
+"""Settings: a commented .ini next to the app."""
 
 from __future__ import annotations
 
