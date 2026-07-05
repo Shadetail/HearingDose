@@ -1,0 +1,435 @@
+# -*- coding: utf-8 -*-
+"""
+Hearing Dose Meter - GUI
+========================
+Always-on-top panel: live dBA from the real audio stream, a running daily-dose
+"tank", a rolling graph that shows the dose accumulating and (log-shaped)
+recovering, and a warning when you spend the day's budget.
+
+Drag = move · right-click = menu · Esc = quit
+"""
+
+from __future__ import annotations
+
+import collections
+import os
+import time
+import tkinter as tk
+
+from .config import load_settings, save_settings
+from .dose import DoseModel, DoseParams, RECOVERY_NOTE
+from .audio import LoopbackMeter
+from .state import load_state, save_state
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(BASE)
+INI_PATH = os.path.join(APP_DIR, "HearingDose.ini")
+STATE_PATH = os.path.join(APP_DIR, "HearingDose.state.json")
+
+# palette (matches SafeTimeWidget's zones)
+BORDER = "#26323A"
+PANEL = "#121A1E"
+PANEL2 = "#0C1215"
+FAINT = "#5E6E76"
+TEXT = "#D7E2E7"
+WARN_BG = "#3A1512"
+
+DBA_ZONES = [(75, "#4FC580"), (85, "#B7D14E"), (90, "#E9B23A"),
+             (95, "#E88A3A"), (100, "#E85A3A")]
+DBA_SEVERE = "#C93526"
+
+
+def dba_color(dba):
+    for bound, c in DBA_ZONES:
+        if dba < bound:
+            return c
+    return DBA_SEVERE
+
+
+def dose_color(frac):
+    if frac < 0.5:
+        return "#4FC580"
+    if frac < 0.8:
+        return "#B7D14E"
+    if frac < 1.0:
+        return "#E9B23A"
+    if frac < 1.25:
+        return "#E85A3A"
+    return DBA_SEVERE
+
+
+def fmt_dur(seconds):
+    if seconds == float("inf"):
+        return "∞"
+    seconds = max(0, seconds)
+    if seconds >= 3600:
+        h = int(seconds // 3600)
+        m = int(round((seconds - h * 3600) / 60))
+        if m == 60:
+            h, m = h + 1, 0
+        return "{}h {:02d}m".format(h, m)
+    if seconds >= 60:
+        return "{} min".format(int(round(seconds / 60)))
+    return "{} sec".format(int(round(seconds)))
+
+
+class App:
+    def __init__(self, root, selftest=False):
+        self.root = root
+        self.selftest = selftest
+        self.s = load_settings(INI_PATH)
+
+        params = DoseParams(
+            criterion_db=self.s["criterion_db"],
+            criterion_hours=self.s["criterion_hours"],
+            exchange_db=self.s["exchange_db"],
+            threshold_db=self.s["threshold_db"],
+            recovery_hours=self.s["recovery_hours"],
+            recovery_t1_min=self.s["recovery_t1_min"],
+            recovery_ceiling_db=self.s["recovery_ceiling_db"],
+        )
+        self.model = DoseModel(params=params)
+        self.downtime = load_state(STATE_PATH, self.model)
+
+        self.meter = LoopbackMeter(self.s["ceiling_db"], self.s["offset_db"],
+                                   self.s["poll_ms"])
+
+        self.history = collections.deque()   # (t, dba, dose)
+        self.last_tick = time.time()
+        self.last_save = 0.0
+        self.warned_pre = False
+        self.warned_full = False
+        self.flash = 0
+
+        root.title("Hearing Dose")
+        root.overrideredirect(True)
+        self.build_ui()
+        self.apply_style()
+        self.bind_events()
+        root.geometry("+{}+{}".format(self.s["x"], self.s["y"]))
+
+        if selftest:
+            root.after(1500, self._selftest_done)
+        self.tick()
+
+    # -- UI construction ----------------------------------------------------
+    def build_ui(self):
+        s = self.s
+        fam = s["font_family"]
+        self.border = tk.Frame(self.root, bg=BORDER)
+        self.border.pack(fill="both", expand=True)
+        self.panel = tk.Frame(self.border, bg=PANEL, padx=12, pady=10)
+        self.panel.pack(padx=2, pady=2, fill="both", expand=True)
+
+        # header: dBA (left) + dose % (right)
+        head = tk.Frame(self.panel, bg=PANEL)
+        head.pack(fill="x")
+        left = tk.Frame(head, bg=PANEL)
+        left.pack(side="left")
+        self.dba_lbl = tk.Label(left, text="--", bg=PANEL, fg=TEXT,
+                                font=(fam, 30, "bold"))
+        self.dba_lbl.pack(anchor="w")
+        tk.Label(left, text="dBA  (at the ear)", bg=PANEL, fg=FAINT,
+                 font=(fam, 8)).pack(anchor="w")
+        right = tk.Frame(head, bg=PANEL)
+        right.pack(side="right")
+        self.dose_lbl = tk.Label(right, text="0%", bg=PANEL, fg=TEXT,
+                                 font=(fam, 30, "bold"))
+        self.dose_lbl.pack(anchor="e")
+        tk.Label(right, text="daily dose", bg=PANEL, fg=FAINT,
+                 font=(fam, 8)).pack(anchor="e")
+
+        # dose bar
+        self.bar = tk.Canvas(self.panel, height=14, bg=PANEL2, highlightthickness=0)
+        self.bar.pack(fill="x", pady=(8, 4))
+
+        # status line
+        self.status = tk.Label(self.panel, text="", bg=PANEL, fg=FAINT,
+                               font=(fam, 10), anchor="w")
+        self.status.pack(fill="x")
+
+        # rolling graph
+        self.graph = tk.Canvas(self.panel, height=96, bg=PANEL2, highlightthickness=0)
+        self.graph.pack(fill="x", pady=(6, 2))
+
+        # footer (device / warnings)
+        self.footer = tk.Label(self.panel, text="", bg=PANEL, fg=FAINT,
+                               font=(fam, 8), anchor="w")
+        self.footer.pack(fill="x")
+
+        self._build_menu()
+
+    def _build_menu(self):
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="Reload settings", command=self.reload)
+        m.add_command(label="Edit settings (.ini)...", command=self.edit_ini)
+        m.add_separator()
+        m.add_command(label="Reset dose to 0%", command=self.reset_dose)
+        m.add_separator()
+        m.add_command(label="Quit", command=self.quit)
+        self.menu = m
+
+    def bind_events(self):
+        for w in (self.root, self.border, self.panel, self.dba_lbl,
+                  self.dose_lbl, self.status, self.footer):
+            w.bind("<Button-1>", self._drag_start)
+            w.bind("<B1-Motion>", self._drag_move)
+            w.bind("<ButtonRelease-1>", self._drag_end)
+            w.bind("<Button-3>", self._popup)
+        self.root.bind("<Escape>", lambda e: self.quit())
+
+    # -- styling ------------------------------------------------------------
+    def apply_style(self):
+        self.root.attributes("-topmost", self.s["always_on_top"])
+        self.root.attributes("-alpha", self.s["opacity"])
+        self.root.geometry("360x252")
+
+    # -- interactions -------------------------------------------------------
+    def _popup(self, e):
+        try:
+            self.menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            self.menu.grab_release()
+
+    def _drag_start(self, e):
+        self._dx = e.x_root - self.root.winfo_x()
+        self._dy = e.y_root - self.root.winfo_y()
+
+    def _drag_move(self, e):
+        self.root.geometry("+{}+{}".format(e.x_root - self._dx, e.y_root - self._dy))
+
+    def _drag_end(self, e):
+        self.s["x"] = self.root.winfo_x()
+        self.s["y"] = self.root.winfo_y()
+        save_settings(INI_PATH, self.s)
+
+    def reload(self):
+        self.s = load_settings(INI_PATH)
+        self.model.params = DoseParams(
+            criterion_db=self.s["criterion_db"], criterion_hours=self.s["criterion_hours"],
+            exchange_db=self.s["exchange_db"], threshold_db=self.s["threshold_db"],
+            recovery_hours=self.s["recovery_hours"], recovery_t1_min=self.s["recovery_t1_min"],
+            recovery_ceiling_db=self.s["recovery_ceiling_db"],
+        )
+        self.meter.ceiling_db = self.s["ceiling_db"]
+        self.meter.offset_db = self.s["offset_db"]
+        self.apply_style()
+
+    def edit_ini(self):
+        try:
+            os.startfile(INI_PATH)
+        except Exception:
+            pass
+
+    def reset_dose(self):
+        import tkinter.messagebox as mb
+        if mb.askyesno("Reset dose", "Reset today's dose to 0%?"):
+            self.model.reset()
+            self.history.clear()
+            self.warned_pre = self.warned_full = False
+
+    def quit(self):
+        try:
+            self.s["x"] = self.root.winfo_x()
+            self.s["y"] = self.root.winfo_y()
+            save_settings(INI_PATH, self.s)
+            save_state(STATE_PATH, self.model)
+            self.meter.close()
+        finally:
+            self.root.destroy()
+
+    # -- main loop ----------------------------------------------------------
+    def tick(self):
+        now = time.time()
+        dt = now - self.last_tick
+        self.last_tick = now
+        dt = min(dt, 5.0)   # guard against long stalls / sleep
+
+        r = self.meter.poll()
+        dba_for_model = r.dba if not r.silent else 0.0
+        self.model.update(dba_for_model, dt)
+
+        # history for the graph (1 point per tick)
+        self.history.append((now, r.dba if not r.silent else 0.0, self.model.dose))
+        window = self.s["graph_minutes"] * 60
+        while self.history and now - self.history[0][0] > window:
+            self.history.popleft()
+
+        self.render(r)
+        self.check_warnings()
+
+        if now - self.last_save > 10:
+            save_state(STATE_PATH, self.model)
+            self.last_save = now
+
+        if self.s["always_on_top"]:
+            self.root.attributes("-topmost", True)
+        if not self.selftest:
+            self.root.after(self.s["poll_ms"], self.tick)
+
+    def render(self, r):
+        dose = self.model.dose
+        # header numbers
+        if r.muted:
+            self.dba_lbl.configure(text="muted", fg=FAINT)
+        elif r.silent:
+            self.dba_lbl.configure(text="quiet", fg=FAINT)
+        elif not r.ok:
+            self.dba_lbl.configure(text="--", fg=FAINT)
+        else:
+            self.dba_lbl.configure(text="{:.0f}".format(r.dba), fg=dba_color(r.dba))
+        self.dose_lbl.configure(text="{:.0f}%".format(dose * 100), fg=dose_color(dose))
+
+        # status line
+        p = self.model.params
+        if (not r.silent) and (not r.muted) and r.dba >= p.threshold_db:
+            t = self.model.seconds_to_full(r.dba, self.s["warn_at"])
+            self.status.configure(
+                text="▲ spending · full at {}".format(
+                    "∞" if t == float("inf") else "~" + fmt_dur(t)),
+                fg=dose_color(dose))
+        elif dose > 0.005 and ((r.silent or r.muted) or r.dba < p.recovery_ceiling_db):
+            t = self.model.seconds_to_clear()
+            self.status.configure(
+                text="▼ recovering · clears ~{}".format(fmt_dur(t)),
+                fg="#6FB0C8")
+        else:
+            self.status.configure(text="— holding", fg=FAINT)
+
+        # footer
+        peak = self.model.peak_dose
+        extra = ""
+        if not r.ok:
+            extra = "  · no audio device"
+        self.footer.configure(
+            text="peak {:.0f}%  ·  vol {:.0f} dB{}".format(
+                peak * 100, r.master_db, extra))
+
+        self.draw_bar(dose)
+        self.draw_graph()
+
+    def draw_bar(self, dose):
+        c = self.bar
+        c.delete("all")
+        w = c.winfo_width() or 336
+        h = int(c["height"])
+        top = max(1.25, dose * 1.05)
+        # prewarn / warn ticks
+        for frac, col in ((self.s["prewarn_at"], "#7A6A2A"), (self.s["warn_at"], "#7A2A22")):
+            x = int(frac / top * w)
+            c.create_line(x, 0, x, h, fill=col)
+        fillw = int(min(dose, top) / top * w)
+        c.create_rectangle(0, 0, fillw, h, fill=dose_color(dose), width=0)
+
+    def draw_graph(self):
+        c = self.graph
+        c.delete("all")
+        w = c.winfo_width() or 336
+        h = int(c["height"])
+        now = time.time()
+        window = self.s["graph_minutes"] * 60
+        pts = list(self.history)
+        if len(pts) < 2:
+            c.create_text(w // 2, h // 2, text="collecting…", fill=FAINT)
+            return
+
+        peak = max(d for _, _, d in pts)
+        top = max(1.25, peak * 1.15)
+
+        def X(t):
+            return (t - (now - window)) / window * w
+
+        def Ydose(d):
+            return h - 4 - (d / top) * (h - 8)
+
+        # gridlines at warn (100%) and prewarn
+        for frac, col in ((self.s["warn_at"], "#5A2A24"), (self.s["prewarn_at"], "#54501F")):
+            if frac <= top:
+                y = Ydose(frac)
+                c.create_line(0, y, w, y, fill=col, dash=(3, 3))
+        # faint dBA underlay (40..100 dBA -> bottom..top)
+        dba_line = []
+        for t, dba, _ in pts:
+            yd = h - 4 - (max(0, min(100, dba) - 40) / 60.0) * (h - 8)
+            dba_line += [X(t), yd]
+        if len(dba_line) >= 4:
+            c.create_line(*dba_line, fill="#2C3A42", width=1)
+        # dose line (bright, colored by current dose)
+        dl = []
+        for t, _, d in pts:
+            dl += [X(t), Ydose(d)]
+        c.create_line(*dl, fill=dose_color(self.model.dose), width=2)
+
+    def check_warnings(self):
+        dose = self.model.dose
+        pre = self.s["prewarn_at"]
+        full = self.s["warn_at"]
+        if dose < pre * 0.9:
+            self.warned_pre = self.warned_full = False
+            self.set_alarm(False)
+        if dose >= full and not self.warned_full:
+            self.warned_full = True
+            self.set_alarm(True)
+            self.notify("Daily dose reached ({:.0f}%)".format(dose * 100),
+                        "You've spent today's safe listening budget. "
+                        "Give your ears real quiet to recover.\n\n" + RECOVERY_NOTE)
+        elif dose >= pre and not self.warned_pre:
+            self.warned_pre = True
+            self.notify("{:.0f}% of daily dose".format(dose * 100),
+                        "Approaching the limit — consider a break or lower level.")
+
+    def set_alarm(self, on):
+        if on:
+            self.border.configure(bg=DBA_SEVERE)
+            self.panel.configure(bg=WARN_BG)
+        else:
+            self.border.configure(bg=BORDER)
+            self.panel.configure(bg=PANEL)
+
+    def notify(self, title, body):
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
+            pass
+        # non-blocking toast window so metering keeps running
+        try:
+            t = tk.Toplevel(self.root)
+            t.overrideredirect(True)
+            t.attributes("-topmost", True)
+            t.configure(bg=DBA_SEVERE)
+            x = self.root.winfo_x()
+            y = self.root.winfo_y() + self.root.winfo_height() + 6
+            t.geometry("360x92+{}+{}".format(x, y))
+            f = tk.Frame(t, bg=PANEL, padx=12, pady=8)
+            f.pack(padx=2, pady=2, fill="both", expand=True)
+            tk.Label(f, text=title, bg=PANEL, fg="#F0C0B8",
+                     font=(self.s["font_family"], 11, "bold"),
+                     anchor="w").pack(fill="x")
+            tk.Label(f, text=body, bg=PANEL, fg=TEXT, justify="left", wraplength=330,
+                     font=(self.s["font_family"], 8), anchor="w").pack(fill="x")
+            t.bind("<Button-1>", lambda e: t.destroy())
+            t.after(9000, t.destroy)
+        except Exception:
+            pass
+
+    def _selftest_done(self):
+        r = self.meter.poll()
+        print("selftest -> dba={} silent={} ok={} dose={:.4f} downtime={:.0f}s".format(
+            "sil" if r.silent else round(r.dba, 1), r.silent, r.ok,
+            self.model.dose, self.downtime))
+        self.meter.close()
+        self.root.destroy()
+
+
+def main():
+    import sys
+    selftest = "--selftest" in sys.argv
+    root = tk.Tk()
+    try:
+        App(root, selftest=selftest)
+    except Exception as e:
+        import tkinter.messagebox as mb
+        mb.showerror("Hearing Dose Meter failed to start", repr(e))
+        raise
+    root.mainloop()
