@@ -32,6 +32,35 @@ There are two filled areas and two horizontal lines:
 
 ---
 
+## Install
+
+```
+pip install PyAudioWPatch pycaw numpy Pillow
+```
+(`Pillow` powers the antialiased graph; it falls back to plain Tk if absent.)
+
+```
+pythonw HearingDose.pyw            # run it (double-click also works)
+python  HearingDose.pyw --selftest # one reading to stdout, then exit
+python  tests/test_dose.py         # unit tests
+```
+
+Controls: **drag** = move · **right-click** = menu (Audio device / Reload / Edit
+.ini / Reset dose / Quit).
+
+### Run at login (optional)
+
+Create a shortcut in your Startup folder
+(`shell:startup`) whose **Target** is your `pythonw.exe` with the script as an
+argument (this avoids the flaky `.pyw` file association):
+
+```
+Target:  C:\path\to\pythonw.exe  "C:\path\to\HearingDose.pyw"
+Start in: C:\path\to\HearingDamage
+```
+
+---
+
 ## ⚠️ First: calibrate it to *your* gear
 
 The app measures the digital signal and your Windows volume, but it **cannot know
@@ -45,7 +74,7 @@ thing you tell it, via a single number: **`ceiling_db`**.
 > below). Everything else — the live volume slider, the actual loudness of
 > what's playing — the app measures for you.
 
-Run the app once (see *Install* below) so it creates `HearingDose.ini`; then
+Run the app once (see *Install* above) so it creates `HearingDose.ini`; then
 right-click the panel → **Edit settings** to change it and **Reload** to apply.
 
 ### Calculate it from the spec sheets
@@ -154,33 +183,6 @@ dose += dt / T(dBA)          T(dBA) = 8h / 2**((dBA - 85) / 3)     # NIOSH
    master volume, so the app reads that slider via `pycaw` and adds it.
 4. **Integrate** a NIOSH dose: 100% = 85 dBA for 8 h, 3 dB exchange rate.
 5. **Recover** during quiet with a front-loaded, log-shaped curve.
-
-## Install
-
-```
-pip install PyAudioWPatch pycaw numpy Pillow
-```
-(`Pillow` powers the antialiased graph; it falls back to plain Tk if absent.)
-
-```
-pythonw HearingDose.pyw            # run it (double-click also works)
-python  HearingDose.pyw --selftest # one reading to stdout, then exit
-python  tests/test_dose.py         # unit tests
-```
-
-Controls: **drag** = move · **right-click** = menu (Audio device / Reload / Edit
-.ini / Reset dose / Quit).
-
-### Run at login (optional)
-
-Create a shortcut in your Startup folder
-(`shell:startup`) whose **Target** is your `pythonw.exe` with the script as an
-argument (this avoids the flaky `.pyw` file association):
-
-```
-Target:  C:\path\to\pythonw.exe  "C:\path\to\HearingDose.pyw"
-Start in: C:\path\to\HearingDamage
-```
 
 ## The model — two confidence levels
 
