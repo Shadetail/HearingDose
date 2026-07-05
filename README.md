@@ -11,19 +11,22 @@ during quiet — and it survives closing the app, crashes, and restarts.
 
 ### Reading the graph
 
-There are two filled areas and two dashed lines:
+There are two filled areas and two horizontal lines:
 
-- **Loudness envelope** (muted blue-grey) — your **realtime** listening level (dBA
-  Leq), moment to moment, on its own scale. This is the raw "how loud right now".
-- **Dose area / curve** (teal fill, coloured line) — your **accumulated** daily
+- **Loudness envelope** (muted blue-grey hill, behind) — your **realtime**
+  listening level (dBA Leq), moment to moment, on its own scale. The raw "how
+  loud right now".
+- **Dose area** (the big coloured fill, in front) — your **accumulated** daily
   noise dose. It climbs while you listen and recovers during quiet. The whole
-  line is a single colour set by your *current* dose, stepping green → lime →
-  amber → orange/red as that dose rises (and back down as it recovers).
-- **Two dashed horizontal lines** — the dose thresholds, on the *dose* scale.
-  The lower **yellow** line is `prewarn_at` (default **80%**) and the upper
-  **red** line is `warn_at` (default **100%** = a full safe daily dose). They're
-  reference marks for the climbing dose curve, **not** for the realtime loudness
-  — the dose curve reaching them (not the loudness envelope) is what triggers the
+  fill is a single colour set by your *current* dose, stepping **green** (under
+  50%) → lime → amber → orange/red as that dose rises, and back down as it
+  recovers. So a low-dose graph looks uniformly green — the colours only appear
+  as the dose actually climbs.
+- **Two thin horizontal lines** — the dose thresholds, on the *dose* scale. The
+  lower **yellow** line is `prewarn_at` (default **80%**) and the upper **red**
+  line is `warn_at` (default **100%** = a full safe daily dose). They're
+  reference marks for the climbing dose fill, **not** for the realtime loudness
+  — the dose reaching them (not the loudness envelope) is what triggers the
   pre-warning and the warning. Both levels are configurable in the `[dose]`
   section of `HearingDose.ini`.
 
