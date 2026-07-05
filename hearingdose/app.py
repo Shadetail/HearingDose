@@ -247,6 +247,23 @@ class App:
 
     def _build_menu(self):
         m = tk.Menu(self.root, tearoff=0)
+
+        # Live display toggles: these apply AND persist immediately, so a
+        # user never has to know about "Reload settings" to change them.
+        self._var_on_top = tk.BooleanVar(value=self.s["always_on_top"])
+        m.add_checkbutton(label="Always on top", variable=self._var_on_top,
+                          command=self._toggle_on_top)
+
+        opac = tk.Menu(m, tearoff=0)
+        self._var_opacity = tk.DoubleVar(value=self.s["opacity"])
+        for label, val in (("Solid (100%)", 1.0), ("90%", 0.9),
+                           ("80%", 0.8), ("70%", 0.7)):
+            opac.add_radiobutton(label=label, value=val,
+                                 variable=self._var_opacity,
+                                 command=self._set_opacity)
+        m.add_cascade(label="Opacity", menu=opac)
+
+        m.add_separator()
         m.add_command(label="Reload settings", command=self.reload)
         m.add_command(label="Edit settings (.ini)...", command=self.edit_ini)
         m.add_separator()
@@ -254,6 +271,16 @@ class App:
         m.add_separator()
         m.add_command(label="Quit", command=self.quit)
         self.menu = m
+
+    def _toggle_on_top(self):
+        self.s["always_on_top"] = bool(self._var_on_top.get())
+        self.root.attributes("-topmost", self.s["always_on_top"])
+        save_settings(INI_PATH, self.s)
+
+    def _set_opacity(self):
+        self.s["opacity"] = float(self._var_opacity.get())
+        self.root.attributes("-alpha", self.s["opacity"])
+        save_settings(INI_PATH, self.s)
 
     def bind_events(self):
         for w in (self.root, self.border, self.panel, self.dba_lbl,
@@ -304,6 +331,8 @@ class App:
         )
         self.meter.ceiling_db = self.s["ceiling_db"]
         self.meter.offset_db = self.s["offset_db"]
+        self._var_on_top.set(self.s["always_on_top"])
+        self._var_opacity.set(self.s["opacity"])
         self.apply_style()
 
     def edit_ini(self):
