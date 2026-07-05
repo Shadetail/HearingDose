@@ -17,6 +17,14 @@ Calibration (validated empirically on this machine):
 
 Only PC audio is measured - not ambient room noise. When nothing plays, WASAPI
 delivers no data and we correctly read it as silence (ears recovering).
+
+Device selection
+    Calibration (`ceiling_db`) is only valid for ONE playback device - the gear
+    it was measured on. So the meter can lock onto a specific output device: it
+    captures the loopback of that device and reads that device's own volume
+    slider. Audio played to any other device produces no loopback frames on the
+    locked device, so it's read as silence and never adds to the dose. With no
+    device locked it falls back to following the current Windows default output.
 """
 
 from __future__ import annotations
@@ -51,6 +59,39 @@ def a_weight_response(freqs: np.ndarray) -> np.ndarray:
 def dbfs_to_dba(dbfs_a: float, master_db: float, ceiling_db: float) -> float:
     """Map an A-weighted digital level to estimated dBA at the ear."""
     return ceiling_db + master_db + (dbfs_a - SINE_DBFS)
+
+
+def _name_prefix_match(prefix: str, name: str) -> bool:
+    """True if `prefix` starts `name` and stops on a word boundary.
+
+    This keeps the loose device-name fallback useful for names like
+    "Speakers" -> "Speakers (Realtek)" without letting "D1" match "D10".
+    """
+    if not prefix or not name.startswith(prefix):
+        return False
+    if len(name) == len(prefix):
+        return True
+    return not name[len(prefix)].isalnum()
+
+
+def endpoint_name_matches(expected: str, candidate: str) -> bool:
+    """Conservative match for two endpoint display names."""
+    if not expected or not candidate:
+        return False
+    return (expected == candidate
+            or _name_prefix_match(expected, candidate)
+            or _name_prefix_match(candidate, expected))
+
+
+def loopback_matches(render_name: str, loopback_name: str) -> bool:
+    """True if `loopback_name` is the WASAPI loopback of render endpoint
+    `render_name`. Loopback devices are named '<render endpoint> [Loopback]', so
+    prefer that exact form and fall back to a conservative prefix match for odd
+    drivers."""
+    suffix = " [Loopback]"
+    if not render_name or not loopback_name.endswith(suffix):
+        return False
+    return endpoint_name_matches(render_name, loopback_name[:-len(suffix)])
 
 
 # ----------------------------------------------------------------------------
@@ -99,8 +140,12 @@ class LevelResult:
 # Loopback meter: owns the capture stream + the volume reader
 # ----------------------------------------------------------------------------
 class LoopbackMeter:
-    def __init__(self, ceiling_db: float, poll_ms: int = 1000):
+    def __init__(self, ceiling_db: float, poll_ms: int = 1000, device_name: str = ""):
         self.ceiling_db = ceiling_db
+        # "" = follow the current Windows default output; otherwise the exact
+        # render-endpoint name to lock onto (its calibration + volume only).
+        self.device_name = (device_name or "").strip()
+        self.active_device = ""               # render endpoint currently captured
         self._pa = None
         self._stream = None
         self._weigher = None
@@ -111,51 +156,131 @@ class LoopbackMeter:
         self._buf = collections.deque()      # np.float32 blocks, shape (samples, channels)
         self._carry = np.zeros((0, self._channels), np.float32)  # leftover < one frame
 
-        # volume reader (pycaw), re-resolved periodically for device swaps
-        self._get_spk = None
+        # master-volume reader (pycaw), bound to the captured device when the
+        # stream opens; re-resolved on device swap / after a failed read
         self._vol = None
-        self._vol_count = 0
-        self._vol_reeval = max(1, round(1000 / max(1, poll_ms)))
-        self._open_volume()
         self._open_stream()
 
+    # -- device discovery ---------------------------------------------------
+    @staticmethod
+    def list_output_devices():
+        """Names of currently-available WASAPI output (render) endpoints.
+
+        These are the human-facing 'playback devices'; each maps 1:1 to a
+        loopback capture device by name. Used to populate the device picker.
+        """
+        names = []
+        try:
+            import pyaudiowpatch as pyaudio
+            pa = pyaudio.PyAudio()
+            try:
+                wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+                for i in range(pa.get_device_count()):
+                    d = pa.get_device_info_by_index(i)
+                    if (d.get("hostApi") == wasapi["index"]
+                            and int(d.get("maxOutputChannels", 0)) > 0
+                            and not d.get("isLoopbackDevice", False)):
+                        nm = d.get("name", "")
+                        if nm and nm not in names:
+                            names.append(nm)
+            finally:
+                pa.terminate()
+        except Exception:
+            pass
+        return names
+
     # -- pycaw master volume ------------------------------------------------
-    def _open_volume(self):
+    def _open_volume(self, render_name):
+        """Bind the master-volume interface to a specific render endpoint (by
+        name). Blank name (default-follow, if the name can't be matched) falls
+        back to the Windows default endpoint."""
         try:
             from pycaw.utils import AudioUtilities
-            self._get_spk = AudioUtilities.GetSpeakers
-            self._vol = self._get_spk().EndpointVolume
+            vol = self._find_endpoint_volume(render_name) if render_name else None
+            if vol is None and not self.device_name:
+                vol = AudioUtilities.GetSpeakers().EndpointVolume
+            self._vol = vol
         except Exception:
             self._vol = None
 
+    def _find_endpoint_volume(self, render_name):
+        """IAudioEndpointVolume for the active render endpoint named
+        `render_name`, or None if it isn't a currently-active endpoint."""
+        import warnings
+        from pycaw.utils import AudioUtilities
+        from pycaw.constants import EDataFlow, DEVICE_STATE
+        try:
+            with warnings.catch_warnings():
+                # GetAllDevices probes every property store; disconnected
+                # endpoints raise per-property COMErrors we don't care about
+                warnings.simplefilter("ignore")
+                devs = AudioUtilities.GetAllDevices(
+                    EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
+        except Exception:
+            return None
+        exact = loose = None
+        for d in devs:
+            try:
+                fn = d.FriendlyName
+            except Exception:
+                continue
+            if fn == render_name:
+                exact = d
+                break
+            if loose is None and endpoint_name_matches(render_name, fn):
+                loose = d
+        dev = exact or loose
+        if dev is None:
+            return None
+        try:
+            return dev.EndpointVolume
+        except Exception:
+            return None
+
     def _read_volume(self):
         try:
-            if self._vol is None or (self._vol_count % self._vol_reeval) == 0:
-                if self._get_spk is None:
-                    self._open_volume()
-                if self._get_spk is None:
-                    raise RuntimeError("pycaw volume endpoint unavailable")
-                self._vol = self._get_spk().EndpointVolume
-            self._vol_count += 1
+            if self._vol is None:
+                self._open_volume(self.active_device)
+            if self._vol is None:
+                raise RuntimeError("volume endpoint unavailable")
             return float(self._vol.GetMasterVolumeLevel()), bool(self._vol.GetMute()), True
         except Exception:
             self._vol = None
             return 0.0, False, False
 
     # -- loopback stream ----------------------------------------------------
+    def _find_loopback(self, render_name):
+        """The loopback capture device for a render endpoint name, or None.
+        Prefers the exact '<render> [Loopback]' device over a substring hit."""
+        match = None
+        for d in self._pa.get_loopback_device_info_generator():
+            if d["name"] == render_name + " [Loopback]":
+                return d
+            if match is None and loopback_matches(render_name, d["name"]):
+                match = d
+        return match
+
     def _open_stream(self):
         try:
             import pyaudiowpatch as pyaudio
             self._pyaudio = pyaudio
             self._pa = pyaudio.PyAudio()
             wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-            spk = self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
-            lb = spk
-            if not spk.get("isLoopbackDevice", False):
-                for d in self._pa.get_loopback_device_info_generator():
-                    if spk["name"] in d["name"]:
-                        lb = d
-                        break
+
+            # Capture the locked device if one is set, else the current default.
+            target = self.device_name
+            if not target:
+                spk = self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
+                target = spk["name"]
+
+            lb = self._find_loopback(target)
+            if lb is None:
+                # A locked device that's unplugged / disabled lands here. Do NOT
+                # fall back to another device: its calibration wouldn't apply and
+                # we'd count audio the user never meant to measure. Leave the
+                # stream dead -> UI shows it unavailable and no dose accrues.
+                raise RuntimeError("output device unavailable: {!r}".format(target))
+
             self._rate = int(lb["defaultSampleRate"])
             self._channels = max(1, int(lb["maxInputChannels"]))
             self._buf.clear()
@@ -163,7 +288,11 @@ class LoopbackMeter:
             frame = max(256, int(self._rate * 0.1))   # 100 ms analysis frame
             self._weigher = AWeighter(self._rate, frame)
             self._frame = frame
+            self.active_device = target
             self._device_name = lb["name"]
+            # read THIS device's volume slider (not the default's) so the
+            # calibration matches the audio we're actually capturing
+            self._open_volume(target)
             self._stream = self._pa.open(
                 format=pyaudio.paFloat32, channels=self._channels, rate=self._rate,
                 input=True, input_device_index=lb["index"],
@@ -197,14 +326,16 @@ class LoopbackMeter:
         self._stream = None
         self._pa = None
         self._weigher = None
+        self._vol = None            # volume interface belongs to the dead device
+        self.active_device = ""
         self._buf.clear()
         self._carry = np.zeros((0, max(1, self._channels)), np.float32)
 
     # -- the per-tick read --------------------------------------------------
     def poll(self) -> LevelResult:
-        master_db, muted, vol_ok = self._read_volume()
-
-        # reopen a dead stream (device swap, sleep/wake, etc.)
+        # (Re)open a dead stream first (device swap, sleep/wake, unplug) so the
+        # volume read below binds to the right device on the same tick. Opening
+        # the stream also resolves that device's volume interface.
         try:
             if self._stream is None or not self._stream.is_active():
                 self._teardown_stream()
@@ -213,6 +344,8 @@ class LoopbackMeter:
         except Exception:
             self._teardown_stream()
             stream_ok = False
+
+        master_db, muted, vol_ok = self._read_volume()
         ok = vol_ok and stream_ok
 
         # drain everything the callback buffered since last poll

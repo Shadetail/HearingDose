@@ -8,6 +8,7 @@ import os
 
 DEFAULTS = {
     # calibration
+    "device": "",            # locked output device (blank = follow Windows default)
     "ceiling_db": 114.0,     # full-scale sine at MAX volume, field-equivalent dB SPL
     # dose - accrual (NIOSH)
     "criterion_db": 85.0,
@@ -40,6 +41,14 @@ _TEMPLATE = """\
 ; ============================================================
 
 [calibration]
+; The output device this calibration is for. Blank = follow the current Windows
+; default output (legacy behaviour). Set it - easiest via right-click > Audio
+; device - to LOCK onto one device, e.g. your calibrated headphones. Then audio
+; you play on any OTHER device (speakers, TV, ...) is ignored and never adds to
+; your dose. ceiling_db below is only valid for this one device. Use the exact
+; device name Windows shows (e.g. D1 (GO link 2)).
+device = {device}
+
 ; Full-scale sine at MAX Windows volume - your hardware ceiling, as a
 ; free-field-equivalent dB SPL (the reference the 85 dBA limit uses; roughly
 ; eardrum SPL minus ~5 dB of ear-canal gain). See README for calibration.
@@ -98,6 +107,7 @@ def _num(cp, sec, key, default, cast):
 def _clamp_settings(s: dict) -> dict:
     """Keep hand-edited .ini values in safe ranges so a typo can't crash the app
     (e.g. exchange_db=0 -> divide-by-zero, or an out-of-range opacity)."""
+    s["device"] = str(s.get("device", "")).strip()
     s["poll_ms"] = int(max(100, min(10000, s["poll_ms"])))
     s["graph_minutes"] = max(1, int(s["graph_minutes"]))
     s["opacity"] = max(0.2, min(1.0, float(s["opacity"])))
@@ -115,7 +125,8 @@ def load_settings(path: str) -> dict:
     if not os.path.exists(path):
         save_settings(path, s)
         return s
-    cp = configparser.ConfigParser()
+    # interpolation=None so a device name containing '%' can't crash the parser
+    cp = configparser.ConfigParser(interpolation=None)
     try:
         cp.read(path, encoding="utf-8")
     except Exception:

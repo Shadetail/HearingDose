@@ -114,6 +114,32 @@ change it first.**
 
 ---
 
+## Lock it to *your* calibrated device
+
+Your `ceiling_db` is only valid for the **one device you calibrated**. If the app
+just followed whatever Windows is playing through, then switching your default
+output to desktop speakers or a TV and playing music would keep accruing dose
+against your *headphone* calibration — wrong, and usually a big over-count.
+
+So tell the app which device to meter: **right-click → Audio device →** pick your
+calibrated headphones. That **locks** the meter to that one device. From then on:
+
+- Only audio actually played **to that device** is measured. Play music on your
+  speakers or TV and it adds **nothing** to your dose — the locked device's
+  loopback is silent, and the app reads that (correctly) as quiet.
+- The app reads **that device's own** Windows volume slider, so calibration stays
+  correct even when it isn't your default output.
+- Unplug or disable the locked device and the footer shows it **unavailable** and
+  no dose accrues — it never silently falls back to some other (uncalibrated)
+  output.
+
+The current device is shown in the footer. The choice is saved as `device` in the
+`[calibration]` section of `HearingDose.ini` (the exact name Windows shows, e.g.
+`D1 (GO link 2)`); leave it **blank** to fall back to following the Windows
+default output. Locking the device you calibrated is strongly recommended.
+
+---
+
 ## How it works
 
 ```
@@ -121,7 +147,8 @@ dBA  = ceiling_db + windows_volume_dB + (measured_A_weighted_dBFS + 3.01)
 dose += dt / T(dBA)          T(dBA) = 8h / 2**((dBA - 85) / 3)     # NIOSH
 ```
 
-1. **Capture** the output stream via WASAPI loopback (`pyaudiowpatch`).
+1. **Capture** the output stream via WASAPI loopback (`pyaudiowpatch`) — from
+   your locked device, or the current Windows default if none is locked.
 2. **A-weight** it with a real IEC-61672 filter → a true dBA.
 3. **Add back the volume slider.** Loopback captures the mix *before* Windows
    master volume, so the app reads that slider via `pycaw` and adds it.
@@ -141,8 +168,8 @@ python  HearingDose.pyw --selftest # one reading to stdout, then exit
 python  tests/test_dose.py         # unit tests
 ```
 
-Controls: **drag** = move · **right-click** = menu (Reload / Edit .ini / Reset
-dose / Quit).
+Controls: **drag** = move · **right-click** = menu (Audio device / Reload / Edit
+.ini / Reset dose / Quit).
 
 ### Run at login (optional)
 
@@ -177,6 +204,9 @@ trust near the limit. Tune `recovery_hours`, `recovery_t1_min`,
   the dominant uncertainty. The *temporal* accounting (accrual vs recovery over
   time) is the trustworthy part regardless.
 - **PC audio only.** Loopback hears what the computer plays, nothing in the room.
+- **One device at a time.** Calibration is per-device, so lock the meter to the
+  device you calibrated (right-click → Audio device). Audio on any other output
+  is ignored — switch to speakers and that playback won't touch your dose.
 - **Short tones integrate correctly.** The meter uses A-weighted energy (Leq),
   and the 3 dB rule is equal-energy, so a 1-second tone contributes its full
   energy regardless of how it lines up with the ~1 s sampling window. For sparse

@@ -177,7 +177,7 @@ class App:
         self.model = DoseModel(params=params)
         self.downtime = load_state(STATE_PATH, self.model)
 
-        self.meter = LoopbackMeter(self.s["ceiling_db"], self.s["poll_ms"])
+        self.meter = LoopbackMeter(self.s["ceiling_db"], self.s["poll_ms"], self.s["device"])
 
         self.history = collections.deque()   # (t, dba, dose)
         self.last_tick = time.time()
@@ -262,6 +262,14 @@ class App:
                                  command=self._set_opacity)
         m.add_cascade(label="Opacity", menu=opac)
 
+        # Audio device: lock the meter to one output (e.g. your calibrated
+        # headphones) so audio on any other device is ignored. Rebuilt each time
+        # it's opened so plugged/unplugged devices show up live.
+        self._var_device = tk.StringVar(value=self.s.get("device", ""))
+        dm = tk.Menu(m, tearoff=0)
+        dm.configure(postcommand=lambda dm=dm: self._populate_device_menu(dm))
+        m.add_cascade(label="Audio device", menu=dm)
+
         m.add_separator()
         m.add_command(label="Reload settings", command=self.reload)
         m.add_command(label="Edit settings (.ini)...", command=self.edit_ini)
@@ -280,6 +288,44 @@ class App:
         self.s["opacity"] = float(self._var_opacity.get())
         self.root.attributes("-alpha", self.s["opacity"])
         save_settings(INI_PATH, self.s)
+
+    def _populate_device_menu(self, dm):
+        dm.delete(0, "end")
+        locked = self.s.get("device", "")
+        self._var_device.set(locked)
+        dm.add_radiobutton(label="Default (follow Windows)", value="",
+                           variable=self._var_device, command=self._set_device)
+        try:
+            names = LoopbackMeter.list_output_devices()
+        except Exception:
+            names = []
+        if names:
+            dm.add_separator()
+            for n in names:
+                dm.add_radiobutton(label=n, value=n, variable=self._var_device,
+                                   command=self._set_device)
+        # a locked device that isn't currently connected still needs to show
+        # (checked) so the user can see and change what they're locked to
+        if locked and locked not in names:
+            dm.add_separator()
+            dm.add_radiobutton(label=locked + "   — not connected", value=locked,
+                               variable=self._var_device, command=self._set_device)
+
+    def _set_device(self):
+        new = self._var_device.get()
+        if new == self.s.get("device", ""):
+            return
+        self.s["device"] = new
+        save_settings(INI_PATH, self.s)
+        self._reopen_meter()
+
+    def _reopen_meter(self):
+        try:
+            self.meter.close()
+        except Exception:
+            pass
+        self.meter = LoopbackMeter(self.s["ceiling_db"], self.s["poll_ms"], self.s["device"])
+        self.history.clear()   # graph context changed; don't splice devices
 
     def bind_events(self):
         for w in (self.root, self.border, self.panel, self.dba_lbl,
@@ -328,7 +374,11 @@ class App:
             recovery_hours=self.s["recovery_hours"], recovery_t1_min=self.s["recovery_t1_min"],
             recovery_ceiling_db=self.s["recovery_ceiling_db"],
         )
-        self.meter.ceiling_db = self.s["ceiling_db"]
+        if self.s["device"] != self.meter.device_name:
+            self._reopen_meter()          # picks up the new ceiling_db too
+        else:
+            self.meter.ceiling_db = self.s["ceiling_db"]
+        self._var_device.set(self.s["device"])
         self._var_on_top.set(self.s["always_on_top"])
         self._var_opacity.set(self.s["opacity"])
         self.apply_style()
@@ -434,17 +484,34 @@ class App:
         else:
             self.status.configure(text="— holding", fg=FAINT)
 
-        # footer
+        # footer: peak dose, current volume, and which device we're metering
         peak = self.model.peak_dose
-        extra = ""
+        dev = self._device_label()
         if not r.ok:
-            extra = "  · no audio device"
-        self.footer.configure(
-            text="peak {:.0f}%  ·  vol {:.0f} dB{}".format(
-                peak * 100, r.master_db, extra))
+            if self.meter.device_name:
+                tail = "  ·  {} unavailable".format(dev)
+            else:
+                tail = "  ·  no audio device"
+            self.footer.configure(text="peak {:.0f}%{}".format(peak * 100, tail))
+        else:
+            self.footer.configure(
+                text="peak {:.0f}%  ·  vol {:.0f} dB  ·  {}".format(
+                    peak * 100, r.master_db, dev))
 
         self.draw_bar(dose)
         self.draw_graph()
+
+    def _device_label(self, maxlen=30):
+        """Short label for the metered device shown in the footer."""
+        if self.meter.device_name:
+            name = self.meter.device_name          # locked
+        elif self.meter.active_device:
+            name = self.meter.active_device + " (default)"
+        else:
+            name = "default output"
+        if len(name) > maxlen:
+            name = name[:maxlen - 1] + "…"
+        return name
 
     def draw_bar(self, dose):
         c = self.bar

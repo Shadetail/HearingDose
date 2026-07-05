@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 from hearingdose.dose import DoseParams, DoseModel
-from hearingdose.audio import AWeighter, dbfs_to_dba, a_weight_response, SINE_DBFS
+from hearingdose.audio import (AWeighter, dbfs_to_dba, a_weight_response,
+                               SINE_DBFS, loopback_matches)
 
 fails = []
 
@@ -104,6 +105,19 @@ stereo_same_ms = weighter.mean_square(np.column_stack([sine, sine]))
 stereo_left_ms = weighter.mean_square(np.column_stack([sine, np.zeros_like(sine)]))
 check("stereo identical preserves per-ear level", approx(stereo_same_ms, mono_ms, tol=1e-3))
 check("stereo left-only preserves active-ear level", approx(stereo_left_ms, mono_ms, tol=1e-3))
+
+# --- device / loopback name matching --------------------------------------
+check("loopback matches its own render endpoint",
+      loopback_matches("D1 (GO link 2)", "D1 (GO link 2) [Loopback]"))
+check("loopback matches when the endpoint name is a substring",
+      loopback_matches("Speakers", "Speakers (Realtek) [Loopback]"))
+check("loopback rejects a different device",
+      not loopback_matches("D1 (GO link 2)", "Yeti Output (Yeti) [Loopback]"))
+check("loopback rejects a blank target", not loopback_matches("", "Anything [Loopback]"))
+check("loopback rejects prefix collisions",
+      not loopback_matches("D1", "D10 [Loopback]"))
+check("loopback only matches loopback devices",
+      not loopback_matches("Speakers", "Speakers (Realtek)"))
 
 # --- downtime recovery ----------------------------------------------------
 m = DoseModel()
