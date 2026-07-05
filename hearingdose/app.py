@@ -12,6 +12,7 @@ Drag = move · right-click = menu (Reload / Reset / Quit)
 from __future__ import annotations
 
 import collections
+import math
 import os
 import time
 import tkinter as tk
@@ -93,11 +94,26 @@ def _blend(rgb, bg, a):
 PANEL2_RGB = _hex_to_rgb(PANEL2)
 
 
+def _smooth(vals, k=5):
+    """Light moving-average so the loudness contour is a soft hill, not spikes."""
+    n = len(vals)
+    if k <= 1 or n < 3:
+        return list(vals)
+    half = k // 2
+    out = []
+    for i in range(n):
+        a = i - half if i - half > 0 else 0
+        b = i + half + 1 if i + half + 1 < n else n
+        out.append(sum(vals[a:b]) / (b - a))
+    return out
+
+
 def render_dose_graph_image(W, H, cols, top, dose_hex, warn_at, prewarn_at, S=3):
     """Render the rolling graph to an antialiased PIL image (supersample+LANCZOS).
 
-    `cols` is a list of (x_column, dba_min, dba_max, dose) left->right. The dBA
-    range is drawn as a faint envelope band; the dose is a filled area + line.
+    `cols` is a list of (x_column, leq_dba, dose) left->right. Everything is a
+    FILLED area (no thin lines to shimmer as the window scrolls): the dBA Leq is
+    a smoothed loudness hill behind, the dose is a translucent area in front.
     Pure (no Tk) so it can be rendered to a PNG and eyeballed in tests.
     """
     img = Image.new("RGB", (W * S, H * S), PANEL2_RGB)
@@ -115,11 +131,15 @@ def render_dose_graph_image(W, H, cols, top, dose_hex, warn_at, prewarn_at, S=3)
     def y_dba(db):
         return base - (min(100.0, max(40.0, db)) - 40.0) / 60.0 * span
 
-    # dBA envelope band (min..max), faint, behind everything
-    band = _blend((110, 140, 165), PANEL2_RGB, 0.32)
-    top_e = [(cx(col), y_dba(mx)) for col, mn, mx, _ in cols]
-    bot_e = [(cx(col), y_dba(mn)) for col, mn, mx, _ in reversed(cols)]
-    d.polygon(top_e + bot_e, fill=band)
+    xs = [cx(col) for col, _, _ in cols]
+
+    # dBA loudness contour (smoothed Leq), filled from the baseline -> a soft
+    # hill. No min/max spikes, so nothing thin flickers as the window scrolls.
+    levels = _smooth([leq for _, leq, _ in cols], 5)
+    dba_area = ([(xs[0], base)]
+                + [(xs[i], y_dba(levels[i])) for i in range(len(cols))]
+                + [(xs[-1], base)])
+    d.polygon(dba_area, fill=_blend((95, 125, 150), PANEL2_RGB, 0.30))
 
     # warn / prewarn gridlines
     for frac, rgb in ((warn_at, (185, 88, 74)), (prewarn_at, (150, 138, 70))):
@@ -127,12 +147,14 @@ def render_dose_graph_image(W, H, cols, top, dose_hex, warn_at, prewarn_at, S=3)
             y = int(y_dose(frac))
             d.line([(0, y), (W * S, y)], fill=rgb, width=max(1, S // 2))
 
-    # dose filled area + line (the hero)
+    # dose filled area (translucent, so the loudness hill shows through) + soft edge
     dose_rgb = _hex_to_rgb(dose_hex)
-    line_pts = [(cx(col), y_dose(dose)) for col, _, _, dose in cols]
-    d.polygon([(line_pts[0][0], base)] + line_pts + [(line_pts[-1][0], base)],
-              fill=_blend(dose_rgb, PANEL2_RGB, 0.34))
-    d.line(line_pts, fill=dose_rgb, width=2 * S, joint="curve")
+    dose_pts = [(xs[i], y_dose(cols[i][2])) for i in range(len(cols))]
+    overlay = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+    ImageDraw.Draw(overlay).polygon(
+        [(xs[0], base)] + dose_pts + [(xs[-1], base)], fill=dose_rgb + (205,))
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    ImageDraw.Draw(img).line(dose_pts, fill=dose_rgb, width=2 * S, joint="curve")
 
     return img.resize((W, H), _LANCZOS)
 
@@ -432,21 +454,27 @@ class App:
             self._draw_graph_tk(c, W, H, cols, top)
 
     def _bin_columns(self, pts, now, window, W):
-        cols = {}
+        # one bin per horizontal pixel; dBA is energy-averaged to a per-column
+        # Leq (equal-energy, matching the 3 dB dose rule), dose keeps its latest.
+        acc = {}
         for t, dba, dose in pts:
             col = int((t - (now - window)) / window * W)
             col = 0 if col < 0 else (W - 1 if col > W - 1 else col)
-            e = cols.get(col)
+            p = 10.0 ** (dba / 10.0)
+            e = acc.get(col)
             if e is None:
-                cols[col] = [dba, dba, dose, t]
+                acc[col] = [p, 1, dose, t]
             else:
-                if dba < e[0]:
-                    e[0] = dba
-                if dba > e[1]:
-                    e[1] = dba
+                e[0] += p
+                e[1] += 1
                 if t >= e[3]:
                     e[2], e[3] = dose, t
-        return [(col, cols[col][0], cols[col][1], cols[col][2]) for col in sorted(cols)]
+        out = []
+        for col in sorted(acc):
+            s, n, dose, _t = acc[col]
+            leq = 10.0 * math.log10(s / n) if s > 0 else 0.0
+            out.append((col, leq, dose))
+        return out
 
     def _draw_graph_pil(self, c, W, H, cols, top):
         img = render_dose_graph_image(
@@ -468,26 +496,25 @@ class App:
         def y_dba(db):
             return base - (min(100.0, max(40.0, db)) - 40.0) / 60.0 * span
 
-        env = []
-        for col, mn, mx, _ in cols:
-            env += [col, y_dba(mx)]
-        for col, mn, mx, _ in reversed(cols):
-            env += [col, y_dba(mn)]
-        if len(env) >= 6:
-            c.create_polygon(*env, fill="#20343E", outline="")
-        for frac, col in ((self.s["warn_at"], "#5A2A24"), (self.s["prewarn_at"], "#54501F")):
+        levels = _smooth([leq for _, leq, _ in cols], 5)
+        dba = [cols[0][0], base]
+        for i, (col, leq, dose) in enumerate(cols):
+            dba += [col, y_dba(levels[i])]
+        dba += [cols[-1][0], base]
+        if len(dba) >= 6:
+            c.create_polygon(*dba, fill="#243742", outline="")
+        for frac, colr in ((self.s["warn_at"], "#8A3A30"), (self.s["prewarn_at"], "#7A6E36")):
             if frac <= top:
                 y = y_dose(frac)
-                c.create_line(0, y, W, y, fill=col, dash=(3, 3))
-        line_pts = [(col, y_dose(dose)) for col, _, _, dose in cols]
-        area = [line_pts[0][0], base]
-        for x, y in line_pts:
-            area += [x, y]
-        area += [line_pts[-1][0], base]
-        c.create_polygon(*area, fill="#123039", outline="")
+                c.create_line(0, y, W, y, fill=colr, dash=(3, 3))
+        area = [cols[0][0], base]
+        for col, leq, dose in cols:
+            area += [col, y_dose(dose)]
+        area += [cols[-1][0], base]
+        c.create_polygon(*area, fill="#17414C", outline="")
         dl = []
-        for x, y in line_pts:
-            dl += [x, y]
+        for col, leq, dose in cols:
+            dl += [col, y_dose(dose)]
         c.create_line(*dl, fill=dose_color(self.model.dose), width=2)
 
     def check_warnings(self):

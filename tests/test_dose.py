@@ -155,7 +155,7 @@ finally:
 # --- graph render smoke test (guards the antialiased renderer) ------------
 from hearingdose.app import render_dose_graph_image, _HAVE_PIL
 if _HAVE_PIL:
-    _cols = [(i, 45 + i % 10, 70 + i % 15, min(1.2, i / 250.0)) for i in range(0, 360, 3)]
+    _cols = [(i, 60 + (i % 30), min(1.2, i / 250.0)) for i in range(0, 360, 3)]
     _img = render_dose_graph_image(378, 96, _cols, 1.25, "#4FC580", 1.0, 0.8)
     check("graph renders to the requested size", _img.size == (378, 96))
 else:

@@ -4,4 +4,3 @@ __pycache__/
 # per-machine config + running state (auto-created on first run)
 HearingDose.ini
 HearingDose.state.json
-SafeTimeWidget.ini
