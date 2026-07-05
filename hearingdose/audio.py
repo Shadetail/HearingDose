@@ -9,11 +9,11 @@ Calibration (validated empirically on this machine):
     * WASAPI loopback captures the digital mix BEFORE the Windows master volume
       slider, so we read that slider separately via pycaw and add it back.
     * A full-scale 1 kHz sine measures -3.01 dBFS and, at max volume, hits
-      `ceiling_db` SPL (your hardware ceiling, e.g. 119).
+      `ceiling_db` SPL (your hardware ceiling, e.g. 114).
     * A-weighting is applied to the real signal, so the result is a true dBA -
       no flat-vs-A fudge factor like the old widget needed.
 
-        dBA = ceiling_db + master_db + (dbfs_A + 3.01) + offset_db
+        dBA = ceiling_db + master_db + (dbfs_A + 3.01)
 
 Only PC audio is measured - not ambient room noise. When nothing plays, WASAPI
 delivers no data and we correctly read it as silence (ears recovering).
@@ -48,10 +48,9 @@ def a_weight_response(freqs: np.ndarray) -> np.ndarray:
     return r_a * (10.0 ** (2.0 / 20.0))
 
 
-def dbfs_to_dba(dbfs_a: float, master_db: float, ceiling_db: float,
-                offset_db: float = 0.0) -> float:
+def dbfs_to_dba(dbfs_a: float, master_db: float, ceiling_db: float) -> float:
     """Map an A-weighted digital level to estimated dBA at the ear."""
-    return ceiling_db + master_db + (dbfs_a - SINE_DBFS) + offset_db
+    return ceiling_db + master_db + (dbfs_a - SINE_DBFS)
 
 
 # ----------------------------------------------------------------------------
@@ -100,9 +99,8 @@ class LevelResult:
 # Loopback meter: owns the capture stream + the volume reader
 # ----------------------------------------------------------------------------
 class LoopbackMeter:
-    def __init__(self, ceiling_db: float, offset_db: float = 0.0, poll_ms: int = 1000):
+    def __init__(self, ceiling_db: float, poll_ms: int = 1000):
         self.ceiling_db = ceiling_db
-        self.offset_db = offset_db
         self._pa = None
         self._stream = None
         self._weigher = None
@@ -250,7 +248,7 @@ class LoopbackMeter:
             return LevelResult(SILENCE_DBA, float("-inf"), master_db, True, muted, ok)
 
         dbfs_a = 10.0 * math.log10(mean_ms)
-        dba = dbfs_to_dba(dbfs_a, master_db, self.ceiling_db, self.offset_db)
+        dba = dbfs_to_dba(dbfs_a, master_db, self.ceiling_db)
         return LevelResult(dba, dbfs_a, master_db, False, False, ok)
 
     def close(self):

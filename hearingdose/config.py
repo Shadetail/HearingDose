@@ -8,8 +8,7 @@ import os
 
 DEFAULTS = {
     # calibration
-    "ceiling_db": 119.0,     # full-scale sine at MAX volume, dB SPL (your hardware)
-    "offset_db": 0.0,        # manual nudge if your ears say the numbers are off
+    "ceiling_db": 114.0,     # full-scale sine at MAX volume, field-equivalent dB SPL
     # dose - accrual (NIOSH)
     "criterion_db": 85.0,
     "criterion_hours": 8.0,
@@ -41,12 +40,10 @@ _TEMPLATE = """\
 ; ============================================================
 
 [calibration]
-; Full-scale sine at MAX Windows volume, in dB SPL - your hardware ceiling.
-; Same number as SafeTimeWidget (HEDD D1 + iFi GO Link 2 = 119).
+; Full-scale sine at MAX Windows volume - your hardware ceiling, as a
+; free-field-equivalent dB SPL (the reference the 85 dBA limit uses; roughly
+; eardrum SPL minus ~5 dB of ear-canal gain). See README for calibration.
 ceiling_db = {ceiling_db}
-
-; Manual fine-tune, added to every reading. Leave 0 unless you have reason.
-offset_db = {offset_db}
 
 [dose]
 ; --- Accrual: NIOSH REL. 100% dose = criterion_db for criterion_hours,

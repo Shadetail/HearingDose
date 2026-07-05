@@ -1,8 +1,8 @@
 # Hearing Dose Meter
 
 A realtime hearing-safety meter for Windows. It listens to your PC's **actual
-audio output** (WASAPI loopback — the same stream OBS records), estimates the
-**dBA at your ear**, and tracks a running **daily noise dose**: how much of a
+audio output** (WASAPI loopback — the same stream OBS records), estimates your
+listening level **in dBA**, and tracks a running **daily noise dose**: how much of a
 safe day's listening you've spent, with a live graph and a warning when you hit
 the limit. Dose accrues while you listen and recovers (front-loaded, log-shaped)
 during quiet — and it survives closing the app, crashes, and restarts.
@@ -11,59 +11,92 @@ during quiet — and it survives closing the app, crashes, and restarts.
 
 ---
 
-## ⚠️ First: calibrate it to *your* gear (about 2 minutes)
+## ⚠️ First: calibrate it to *your* gear
 
 The app measures the digital signal and your Windows volume, but it **cannot know
 how physically loud your specific headphones + DAC/amp get** — that's the one
 thing you tell it, via a single number: **`ceiling_db`**.
 
-> **`ceiling_db`** = the level in **dB SPL at your ear** when a maximum (0 dBFS)
-> signal plays at **100% Windows volume** through your gear. It's your hardware's
-> loudness ceiling. Everything else — the live volume slider, the actual loudness
-> of what's playing — the app measures for you.
+> **`ceiling_db`** = the level your gear produces when a maximum (0 dBFS) signal
+> plays at **100% Windows volume** — your hardware's loudness ceiling. It's
+> expressed as a **free-field-equivalent dB SPL**: the reference the 85 dBA
+> safety limits are defined on, *not* eardrum SPL, which runs ~5 dB hotter (see
+> below). Everything else — the live volume slider, the actual loudness of
+> what's playing — the app measures for you.
 
-### Easiest way to set it — match a phone SPL meter
+Run the app once (see *Install* below) so it creates `HearingDose.ini`; then
+right-click the panel → **Edit settings** to change it and **Reload** to apply.
 
-1. **Run the app once** (see *Install* below) so it creates `HearingDose.ini`,
-   then right-click the panel → **Edit settings**.
-2. Install a sound-level-meter app on your phone (**NIOSH SLM** on iOS,
+### Calculate it from the spec sheets
+
+```
+ceiling_db  ≈  sensitivity (dB SPL per volt)  +  20·log10(amp max output, Vrms)  −  5
+```
+
+The **−5 dB** converts reference frames: sensitivity is measured on an
+ear-simulator coupler — i.e. **at the eardrum** — but the 85 dBA damage limits
+are defined for **sound-field** measurements, and the ear canal's gain adds
+roughly 5 dB (A-weighted, on music) between the two. Watch the units: a spec
+quoted per milliwatt converts as `dB/V = dB/mW + 10·log10(1000 / impedance)`,
+and use the amp's output into *your headphone's impedance*, not its no-load
+maximum.
+
+Example: 100 dB/mW at 32 Ω (→ ~115 dB/V) on a dongle doing 1.6 Vrms into 32 Ω →
+`115 + 4 − 5 ≈ 114 dB`.
+
+### Verify with a phone SPL meter
+
+1. Install a sound-level-meter app on your phone (**NIOSH SLM** on iOS,
    **Decibel X** on Android) and set its frequency weighting to **A** so it
    reads **dBA**. (Most generic "Sound Meter" apps only show an unlabeled dB
    with no weighting choice — that's usually unweighted SPL, which over-reads
    bass; Decibel X exposes the A-weighting toggle for free.)
-3. Play steady music you know at a **normal-to-loud** level. Press the phone's
-   mic against one earcup, right over the driver, and read its dBA.
-4. Edit **`ceiling_db`** in the `.ini` and right-click → **Reload** until the
-   app's big dBA number matches the phone. Higher `ceiling_db` → higher reading.
-   (There's also `offset_db` if you prefer to leave `ceiling_db` on a spec value
-   and just nudge the final number.)
+2. Find your phone's **actual mic port** (usually a pinhole on the bottom edge,
+   next to the USB connector) and make sure the meter app is using it. Centering
+   the phone's *body* on the earcup can leave the mic itself outside the cup.
+3. Play **pink noise** (any "pink noise" YouTube video or test file) at a
+   comfortable-but-clearly-loud level. Any playback volume works — the app
+   measures the signal's loudness and the Windows slider live, so your phone
+   reading pins down the one remaining unknown — and pink noise holds steady,
+   so the two numbers aren't dancing while you compare them. Press the mic port
+   against one earcup, centered over the driver, and note the phone's dBA and
+   the app's big dBA at the same moment.
+4. Apply a one-step correction in the `.ini`, then right-click → **Reload**:
 
-That's it — the app now scales correctly across your whole volume range.
+   ```
+   new ceiling_db  =  old ceiling_db + (phone dBA − app dBA) + 5
+   ```
 
-### Or estimate it from spec sheets
+   The `(phone − app)` difference aligns the app with the phone — don't type the
+   phone's reading itself into `ceiling_db`; it isn't that kind of number. The
+   **+5** compensates the phone method's typical under-read (uncalibrated phone
+   mic, crude coupling), so after reloading the app should sit ~5 dB above the
+   phone.
 
-```
-ceiling_db  ≈  headphone sensitivity (dB SPL per volt)  +  20·log10(amp max output, Vrms)
-```
+Do **both** if you can — their errors lean opposite ways. The spec method's
+assumptions (the amp delivers full rated voltage, the pads couple like the lab
+rig) can hardly make it read *low*, while the phone method's weaknesses mostly
+push it *low*. If the two land within a few dB, keep the **larger**
+`ceiling_db` — over-estimating loudness errs on the side of your ears. A gap
+much over 10 dB means something's wrong: a dB/mW spec read as dB/V, a hidden
+gain stage Windows can't see, or the phone mic not actually over the driver.
 
-Example: 100 dB/V headphones on a DAC that swings 2 Vrms →
-`100 + 20·log10(2) ≈ 106 dB`. Use it as a starting point, then verify with the
-phone method — sensitivity specs and ear coupling vary enough that ±several dB is
-normal.
+Once set, the app scales correctly across your whole volume range.
 
 > **Safety:** don't calibrate by playing a full-scale tone at 100% volume — that
 > is the loudest your rig can physically produce. Calibrate at a normal listening
 > level; the model scales up from there.
 
-The default in the `.ini` (`ceiling_db = 119`) is for the author's HEDD D1 + iFi
-GO Link 2. **It is almost certainly wrong for your gear — change it first.**
+The default in the `.ini` (`ceiling_db = 114`) is for the author's HEDD D1 + iFi
+GO Link 2 (the example above). **It is almost certainly wrong for your gear —
+change it first.**
 
 ---
 
 ## How it works
 
 ```
-dBA  = ceiling_db + windows_volume_dB + (measured_A_weighted_dBFS + 3.01) + offset_db
+dBA  = ceiling_db + windows_volume_dB + (measured_A_weighted_dBFS + 3.01)
 dose += dt / T(dBA)          T(dBA) = 8h / 2**((dBA - 85) / 3)     # NIOSH
 ```
 

@@ -177,8 +177,7 @@ class App:
         self.model = DoseModel(params=params)
         self.downtime = load_state(STATE_PATH, self.model)
 
-        self.meter = LoopbackMeter(self.s["ceiling_db"], self.s["offset_db"],
-                                   self.s["poll_ms"])
+        self.meter = LoopbackMeter(self.s["ceiling_db"], self.s["poll_ms"])
 
         self.history = collections.deque()   # (t, dba, dose)
         self.last_tick = time.time()
@@ -330,7 +329,6 @@ class App:
             recovery_ceiling_db=self.s["recovery_ceiling_db"],
         )
         self.meter.ceiling_db = self.s["ceiling_db"]
-        self.meter.offset_db = self.s["offset_db"]
         self._var_on_top.set(self.s["always_on_top"])
         self._var_opacity.set(self.s["opacity"])
         self.apply_style()
