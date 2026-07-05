@@ -176,13 +176,18 @@ class App:
             w.bind("<B1-Motion>", self._drag_move)
             w.bind("<ButtonRelease-1>", self._drag_end)
             w.bind("<Button-3>", self._popup)
-        self.root.bind("<Escape>", lambda e: self.quit())
+        # deliberately NO Escape-to-quit: a stray Esc must not kill an
+        # always-on monitor. Quit only via the right-click menu.
 
     # -- styling ------------------------------------------------------------
     def apply_style(self):
         self.root.attributes("-topmost", self.s["always_on_top"])
         self.root.attributes("-alpha", self.s["opacity"])
-        self.root.geometry("360x252")
+        # size to fit content so nothing clips (fixed min width)
+        self.root.update_idletasks()
+        w = max(360, self.root.winfo_reqwidth())
+        h = self.root.winfo_reqheight()
+        self.root.geometry("{}x{}".format(w, h))
 
     # -- interactions -------------------------------------------------------
     def _popup(self, e):
@@ -240,32 +245,42 @@ class App:
 
     # -- main loop ----------------------------------------------------------
     def tick(self):
-        now = time.time()
-        dt = now - self.last_tick
-        self.last_tick = now
-        dt = min(dt, 5.0)   # guard against long stalls / sleep
+        # The whole body is guarded so a transient error (audio device drop,
+        # COM hiccup) can never kill an always-on monitor: log it and keep
+        # ticking. The next poll re-opens a dropped stream.
+        try:
+            now = time.time()
+            dt = now - self.last_tick
+            self.last_tick = now
+            dt = min(dt, 5.0)   # guard against long stalls / sleep
 
-        r = self.meter.poll()
-        dba_for_model = r.dba if not r.silent else 0.0
-        self.model.update(dba_for_model, dt)
+            r = self.meter.poll()
+            dba_for_model = r.dba if not r.silent else 0.0
+            self.model.update(dba_for_model, dt)
 
-        # history for the graph (1 point per tick)
-        self.history.append((now, r.dba if not r.silent else 0.0, self.model.dose))
-        window = self.s["graph_minutes"] * 60
-        while self.history and now - self.history[0][0] > window:
-            self.history.popleft()
+            # history for the graph (1 point per tick)
+            self.history.append((now, r.dba if not r.silent else 0.0, self.model.dose))
+            window = self.s["graph_minutes"] * 60
+            while self.history and now - self.history[0][0] > window:
+                self.history.popleft()
 
-        self.render(r)
-        self.check_warnings()
+            self.render(r)
+            self.check_warnings()
 
-        if now - self.last_save > 10:
-            save_state(STATE_PATH, self.model)
-            self.last_save = now
+            if now - self.last_save > 10:
+                save_state(STATE_PATH, self.model)
+                self.last_save = now
 
-        if self.s["always_on_top"]:
-            self.root.attributes("-topmost", True)
-        if not self.selftest:
-            self.root.after(self.s["poll_ms"], self.tick)
+            if self.s["always_on_top"]:
+                self.root.attributes("-topmost", True)
+        except Exception as e:
+            try:
+                self.footer.configure(text="recovering from error: {!r}".format(e))
+            except Exception:
+                pass
+        finally:
+            if not self.selftest:
+                self.root.after(self.s["poll_ms"], self.tick)
 
     def render(self, r):
         dose = self.model.dose
@@ -415,9 +430,11 @@ class App:
 
     def _selftest_done(self):
         r = self.meter.poll()
-        print("selftest -> dba={} silent={} ok={} dose={:.4f} downtime={:.0f}s".format(
+        self.root.update_idletasks()
+        print("selftest -> dba={} silent={} ok={} dose={:.4f} downtime={:.0f}s size={}x{}".format(
             "sil" if r.silent else round(r.dba, 1), r.silent, r.ok,
-            self.model.dose, self.downtime))
+            self.model.dose, self.downtime,
+            self.root.winfo_width(), self.root.winfo_height()))
         self.meter.close()
         self.root.destroy()
 

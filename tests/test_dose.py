@@ -100,6 +100,45 @@ m.apply_downtime(8 * 3600)    # 8h closed
 check("downtime recovers dose", m.dose < 0.6)
 check("downtime recovers a lot by 8h", m.dose < 0.15)
 
+# --- persistence round-trip (survives close/crash/restart) ----------------
+import json
+import tempfile
+import time as _time
+from hearingdose.state import save_state, load_state
+
+tmp = os.path.join(tempfile.gettempdir(), "hd_test_state.json")
+try:
+    src = DoseModel()
+    src.dose = 0.7
+    src._dose_at_quiet_start = 0.7
+    save_state(tmp, src)
+
+    # immediate reload preserves dose (near-zero downtime)
+    dst = DoseModel()
+    load_state(tmp, dst)
+    check("state round-trips dose", approx(dst.dose, 0.7, tol=1e-3))
+
+    # simulate a 2h gap by backdating the saved timestamp -> recovery applied
+    with open(tmp, "r", encoding="utf-8") as f:
+        st = json.load(f)
+    st["saved_epoch"] = _time.time() - 2 * 3600
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(st, f)
+    dst2 = DoseModel()
+    down = load_state(tmp, dst2)
+    check("reload after 2h gap reports downtime", down > 3600)
+    check("reload after 2h gap recovers dose", dst2.dose < 0.7)
+
+    # missing file is safe (fresh start at 0)
+    dst3 = DoseModel()
+    load_state(os.path.join(tempfile.gettempdir(), "hd_nope_%d.json" % os.getpid()), dst3)
+    check("missing state file -> dose stays 0", dst3.dose == 0.0)
+finally:
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+
 print()
 if fails:
     print("{} FAILED: {}".format(len(fails), ", ".join(fails)))
