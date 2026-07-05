@@ -27,7 +27,10 @@ thing you tell it, via a single number: **`ceiling_db`**.
 1. **Run the app once** (see *Install* below) so it creates `HearingDose.ini`,
    then right-click the panel → **Edit settings**.
 2. Install a sound-level-meter app on your phone (**NIOSH SLM** on iOS,
-   **Sound Meter** on Android) and set it to **dBA**.
+   **Decibel X** on Android) and set its frequency weighting to **A** so it
+   reads **dBA**. (Most generic "Sound Meter" apps only show an unlabeled dB
+   with no weighting choice — that's usually unweighted SPL, which over-reads
+   bass; Decibel X exposes the A-weighting toggle for free.)
 3. Play steady music you know at a **normal-to-loud** level. Press the phone's
    mic against one earcup, right over the driver, and read its dBA.
 4. Edit **`ceiling_db`** in the `.ini` and right-click → **Reload** until the
