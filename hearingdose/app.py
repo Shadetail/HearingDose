@@ -351,10 +351,14 @@ class App:
             save_state(STATE_PATH, self.model)
 
     def quit(self):
+        # NB: we deliberately do NOT save_settings() here. Every user-mutable
+        # setting already persists the moment it changes (position on drag-end,
+        # opacity / always-on-top on menu toggle), so a quit-time rewrite would
+        # be redundant and, worse, would clobber any external edits made to the
+        # .ini while the app was running. Dose state is different -- it
+        # accumulates continuously and only checkpoints every 10s, so we do
+        # flush it on the way out.
         try:
-            self.s["x"] = self.root.winfo_x()
-            self.s["y"] = self.root.winfo_y()
-            save_settings(INI_PATH, self.s)
             save_state(STATE_PATH, self.model)
             self.meter.close()
         finally:
