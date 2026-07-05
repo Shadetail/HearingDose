@@ -66,7 +66,9 @@ Tune `recovery_hours`, `recovery_t1_min`, and `recovery_ceiling_db` in the ini.
 ## Run
 
 ```
-pip install PyAudioWPatch pycaw numpy      # numpy + pycaw already present
+pip install PyAudioWPatch pycaw numpy Pillow   # numpy/pycaw usually present;
+                                               # Pillow = antialiased graph
+                                               # (falls back to plain Tk if absent)
 pythonw HearingDose.pyw                     # double-click also works
 python  HearingDose.pyw --selftest          # one reading to stdout, then exit
 python  tests/test_dose.py                  # unit tests

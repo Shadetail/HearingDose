@@ -16,6 +16,13 @@ import os
 import time
 import tkinter as tk
 
+try:
+    from PIL import Image, ImageDraw, ImageTk
+    _LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
+    _HAVE_PIL = True
+except Exception:
+    _HAVE_PIL = False
+
 from .config import load_settings, save_settings
 from .dose import DoseModel, DoseParams, RECOVERY_NOTE
 from .audio import LoopbackMeter
@@ -71,6 +78,63 @@ def fmt_dur(seconds):
     if seconds >= 60:
         return "{} min".format(int(round(seconds / 60)))
     return "{} sec".format(int(round(seconds)))
+
+
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _blend(rgb, bg, a):
+    """rgb over bg at opacity a -> solid rgb (Tk canvas has no real alpha)."""
+    return tuple(int(rgb[i] * a + bg[i] * (1.0 - a)) for i in range(3))
+
+
+PANEL2_RGB = _hex_to_rgb(PANEL2)
+
+
+def render_dose_graph_image(W, H, cols, top, dose_hex, warn_at, prewarn_at, S=3):
+    """Render the rolling graph to an antialiased PIL image (supersample+LANCZOS).
+
+    `cols` is a list of (x_column, dba_min, dba_max, dose) left->right. The dBA
+    range is drawn as a faint envelope band; the dose is a filled area + line.
+    Pure (no Tk) so it can be rendered to a PNG and eyeballed in tests.
+    """
+    img = Image.new("RGB", (W * S, H * S), PANEL2_RGB)
+    d = ImageDraw.Draw(img)
+    pad = 4 * S
+    span = (H * S) - 2 * pad
+    base = (H * S) - pad
+
+    def cx(col):
+        return int((col + 0.5) * S)
+
+    def y_dose(v):
+        return base - min(1.0, max(0.0, v / top)) * span
+
+    def y_dba(db):
+        return base - (min(100.0, max(40.0, db)) - 40.0) / 60.0 * span
+
+    # dBA envelope band (min..max), faint, behind everything
+    band = _blend((110, 140, 165), PANEL2_RGB, 0.32)
+    top_e = [(cx(col), y_dba(mx)) for col, mn, mx, _ in cols]
+    bot_e = [(cx(col), y_dba(mn)) for col, mn, mx, _ in reversed(cols)]
+    d.polygon(top_e + bot_e, fill=band)
+
+    # warn / prewarn gridlines
+    for frac, rgb in ((warn_at, (185, 88, 74)), (prewarn_at, (150, 138, 70))):
+        if frac <= top:
+            y = int(y_dose(frac))
+            d.line([(0, y), (W * S, y)], fill=rgb, width=max(1, S // 2))
+
+    # dose filled area + line (the hero)
+    dose_rgb = _hex_to_rgb(dose_hex)
+    line_pts = [(cx(col), y_dose(dose)) for col, _, _, dose in cols]
+    d.polygon([(line_pts[0][0], base)] + line_pts + [(line_pts[-1][0], base)],
+              fill=_blend(dose_rgb, PANEL2_RGB, 0.34))
+    d.line(line_pts, fill=dose_rgb, width=2 * S, joint="curve")
+
+    return img.resize((W, H), _LANCZOS)
 
 
 class App:
@@ -344,41 +408,86 @@ class App:
 
     def draw_graph(self):
         c = self.graph
-        c.delete("all")
-        w = c.winfo_width() or 336
-        h = int(c["height"])
-        now = time.time()
-        window = max(1.0, self.s["graph_minutes"] * 60)
+        W = c.winfo_width() or 336
+        H = int(c["height"])
+        if W < 8 or H < 8:
+            return
         pts = list(self.history)
         if len(pts) < 2:
-            c.create_text(w // 2, h // 2, text="collecting…", fill=FAINT)
+            c.delete("all")
+            c.create_text(W // 2, H // 2, text="collecting…", fill=FAINT)
             return
+        now = time.time()
+        window = max(1.0, self.s["graph_minutes"] * 60)
+        top = max(1.25, max(d for _, _, d in pts) * 1.15)
+        # collapse the per-second points into one bin per horizontal pixel:
+        # dBA keeps its min & max (a smooth envelope instead of a noisy line),
+        # dose keeps the latest value in the bin.
+        cols = self._bin_columns(pts, now, window, W)
+        if len(cols) < 2:
+            return
+        if _HAVE_PIL:
+            self._draw_graph_pil(c, W, H, cols, top)
+        else:
+            self._draw_graph_tk(c, W, H, cols, top)
 
-        peak = max(d for _, _, d in pts)
-        top = max(1.25, peak * 1.15)
+    def _bin_columns(self, pts, now, window, W):
+        cols = {}
+        for t, dba, dose in pts:
+            col = int((t - (now - window)) / window * W)
+            col = 0 if col < 0 else (W - 1 if col > W - 1 else col)
+            e = cols.get(col)
+            if e is None:
+                cols[col] = [dba, dba, dose, t]
+            else:
+                if dba < e[0]:
+                    e[0] = dba
+                if dba > e[1]:
+                    e[1] = dba
+                if t >= e[3]:
+                    e[2], e[3] = dose, t
+        return [(col, cols[col][0], cols[col][1], cols[col][2]) for col in sorted(cols)]
 
-        def X(t):
-            return (t - (now - window)) / window * w
+    def _draw_graph_pil(self, c, W, H, cols, top):
+        img = render_dose_graph_image(
+            W, H, cols, top, dose_color(self.model.dose),
+            self.s["warn_at"], self.s["prewarn_at"])
+        self._graph_photo = ImageTk.PhotoImage(img)
+        c.delete("all")
+        c.create_image(0, 0, anchor="nw", image=self._graph_photo)
 
-        def Ydose(d):
-            return h - 4 - (d / top) * (h - 8)
+    def _draw_graph_tk(self, c, W, H, cols, top):
+        c.delete("all")
+        pad = 4
+        span = H - 2 * pad
+        base = H - pad
 
-        # gridlines at warn (100%) and prewarn
+        def y_dose(v):
+            return base - min(1.0, max(0.0, v / top)) * span
+
+        def y_dba(db):
+            return base - (min(100.0, max(40.0, db)) - 40.0) / 60.0 * span
+
+        env = []
+        for col, mn, mx, _ in cols:
+            env += [col, y_dba(mx)]
+        for col, mn, mx, _ in reversed(cols):
+            env += [col, y_dba(mn)]
+        if len(env) >= 6:
+            c.create_polygon(*env, fill="#20343E", outline="")
         for frac, col in ((self.s["warn_at"], "#5A2A24"), (self.s["prewarn_at"], "#54501F")):
             if frac <= top:
-                y = Ydose(frac)
-                c.create_line(0, y, w, y, fill=col, dash=(3, 3))
-        # faint dBA underlay (40..100 dBA -> bottom..top)
-        dba_line = []
-        for t, dba, _ in pts:
-            yd = h - 4 - (max(0, min(100, dba) - 40) / 60.0) * (h - 8)
-            dba_line += [X(t), yd]
-        if len(dba_line) >= 4:
-            c.create_line(*dba_line, fill="#2C3A42", width=1)
-        # dose line (bright, colored by current dose)
+                y = y_dose(frac)
+                c.create_line(0, y, W, y, fill=col, dash=(3, 3))
+        line_pts = [(col, y_dose(dose)) for col, _, _, dose in cols]
+        area = [line_pts[0][0], base]
+        for x, y in line_pts:
+            area += [x, y]
+        area += [line_pts[-1][0], base]
+        c.create_polygon(*area, fill="#123039", outline="")
         dl = []
-        for t, _, d in pts:
-            dl += [X(t), Ydose(d)]
+        for x, y in line_pts:
+            dl += [x, y]
         c.create_line(*dl, fill=dose_color(self.model.dose), width=2)
 
     def check_warnings(self):
