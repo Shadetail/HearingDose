@@ -26,8 +26,8 @@ DEFAULTS = {
     "poll_ms": 1000,
     "graph_minutes": 30,
     "font_family": "Consolas",
-    "opacity": 0.94,
-    "always_on_top": True,
+    "opacity": 1.0,
+    "always_on_top": False,
     "x": 80,
     "y": 80,
 }
