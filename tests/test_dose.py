@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 from hearingdose.dose import DoseParams, DoseModel
-from hearingdose.audio import dbfs_to_dba, a_weight_response, SINE_DBFS
+from hearingdose.audio import AWeighter, dbfs_to_dba, a_weight_response, SINE_DBFS
 
 fails = []
 
@@ -48,6 +48,8 @@ check("1h @ 79 dBA -> ~0% dose", accrue(79, 1) == 0.0)
 # --- recovery -------------------------------------------------------------
 m = DoseModel()
 check("recovery_fraction(0) == 1", m.recovery_fraction(0) == 1.0)
+check("recovery_fraction(recovery_hours) == 0",
+      m.recovery_fraction(p.recovery_hours * 3600) == 0.0)
 check("recovery_fraction(recovery_hours) ~ 0",
       m.recovery_fraction(p.recovery_hours * 3600) < 1e-6)
 check("recovery is front-loaded (>40% gone by 1h)", m.recovery_fraction(3600) < 0.6)
@@ -91,6 +93,17 @@ check("full-scale sine @ max vol -> ceiling dBA",
       approx(dbfs_to_dba(SINE_DBFS, 0.0, 119.0), 119.0))
 check("parity: -7 dBFS stream @ -23 dB vol",
       approx(dbfs_to_dba(-7.0, -23.0, 119.0), 119 - 23 + (-7 - SINE_DBFS)))
+
+rate = 48000
+frame = 4800
+t = np.arange(frame) / rate
+sine = np.sin(2 * np.pi * 1000 * t).astype(np.float32)
+weighter = AWeighter(rate, frame)
+mono_ms = weighter.mean_square(sine)
+stereo_same_ms = weighter.mean_square(np.column_stack([sine, sine]))
+stereo_left_ms = weighter.mean_square(np.column_stack([sine, np.zeros_like(sine)]))
+check("stereo identical preserves per-ear level", approx(stereo_same_ms, mono_ms, tol=1e-3))
+check("stereo left-only preserves active-ear level", approx(stereo_left_ms, mono_ms, tol=1e-3))
 
 # --- downtime recovery ----------------------------------------------------
 m = DoseModel()

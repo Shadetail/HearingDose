@@ -75,9 +75,15 @@ class AWeighter:
 
     def mean_square(self, mono_frame: np.ndarray) -> float:
         """A-weighted mean square of one frame (relative to full scale)."""
-        X = np.fft.rfft(mono_frame)
-        mag2 = (np.abs(X) * self.gains) ** 2
-        return float(np.sum(self._c * mag2) / self._n2)
+        frame = np.asarray(mono_frame)
+        if frame.ndim == 1:
+            X = np.fft.rfft(frame)
+            mag2 = (np.abs(X) * self.gains) ** 2
+            return float(np.sum(self._c * mag2) / self._n2)
+        X = np.fft.rfft(frame, axis=0)
+        mag2 = (np.abs(X) * self.gains[:, None]) ** 2
+        channel_ms = np.sum(self._c[:, None] * mag2, axis=0) / self._n2
+        return float(np.max(channel_ms))
 
 
 @dataclass
@@ -100,12 +106,15 @@ class LoopbackMeter:
         self._pa = None
         self._stream = None
         self._weigher = None
+        self._pyaudio = None
         self._rate = 48000
         self._channels = 2
-        self._buf = collections.deque()      # np.float32 mono blocks from the callback
-        self._carry = np.zeros(0, np.float32)  # leftover < one frame
+        self._frame = 4800
+        self._buf = collections.deque()      # np.float32 blocks, shape (samples, channels)
+        self._carry = np.zeros((0, self._channels), np.float32)  # leftover < one frame
 
         # volume reader (pycaw), re-resolved periodically for device swaps
+        self._get_spk = None
         self._vol = None
         self._vol_count = 0
         self._vol_reeval = max(1, round(1000 / max(1, poll_ms)))
@@ -124,6 +133,10 @@ class LoopbackMeter:
     def _read_volume(self):
         try:
             if self._vol is None or (self._vol_count % self._vol_reeval) == 0:
+                if self._get_spk is None:
+                    self._open_volume()
+                if self._get_spk is None:
+                    raise RuntimeError("pycaw volume endpoint unavailable")
                 self._vol = self._get_spk().EndpointVolume
             self._vol_count += 1
             return float(self._vol.GetMasterVolumeLevel()), bool(self._vol.GetMute()), True
@@ -146,7 +159,9 @@ class LoopbackMeter:
                         lb = d
                         break
             self._rate = int(lb["defaultSampleRate"])
-            self._channels = int(lb["maxInputChannels"])
+            self._channels = max(1, int(lb["maxInputChannels"]))
+            self._buf.clear()
+            self._carry = np.zeros((0, self._channels), np.float32)
             frame = max(256, int(self._rate * 0.1))   # 100 ms analysis frame
             self._weigher = AWeighter(self._rate, frame)
             self._frame = frame
@@ -165,8 +180,7 @@ class LoopbackMeter:
 
     def _callback(self, in_data, frame_count, time_info, status):
         x = np.frombuffer(in_data, np.float32)
-        if self._channels > 1:
-            x = x.reshape(-1, self._channels).mean(axis=1)
+        x = x.reshape(-1, self._channels).copy()
         self._buf.append(x)
         return (None, self._pyaudio.paContinue)
 
@@ -184,15 +198,24 @@ class LoopbackMeter:
             pass
         self._stream = None
         self._pa = None
+        self._weigher = None
+        self._buf.clear()
+        self._carry = np.zeros((0, max(1, self._channels)), np.float32)
 
     # -- the per-tick read --------------------------------------------------
     def poll(self) -> LevelResult:
         master_db, muted, vol_ok = self._read_volume()
 
         # reopen a dead stream (device swap, sleep/wake, etc.)
-        if self._stream is None or not self._stream.is_active():
+        try:
+            if self._stream is None or not self._stream.is_active():
+                self._teardown_stream()
+                self._open_stream()
+            stream_ok = self._stream is not None and self._stream.is_active()
+        except Exception:
             self._teardown_stream()
-            self._open_stream()
+            stream_ok = False
+        ok = vol_ok and stream_ok
 
         # drain everything the callback buffered since last poll
         blocks = []
@@ -200,15 +223,22 @@ class LoopbackMeter:
             blocks.append(self._buf.popleft())
         samples = np.concatenate([self._carry] + blocks) if blocks else self._carry
 
+        # bound memory: if the UI stalled (e.g. a modal dialog left open) the
+        # callback keeps buffering. Never carry more than ~10 s of audio - dose
+        # only advances by the clamped tick dt anyway, so old audio is moot.
+        cap = self._rate * 10
+        if len(samples) > cap:
+            samples = samples[-cap:]
+
         frame = getattr(self, "_frame", 4800)
         weigher = self._weigher
         n_full = len(samples) // frame
         if weigher is None or n_full == 0:
             self._carry = samples
             if muted:
-                return LevelResult(SILENCE_DBA, float("-inf"), master_db, True, True, vol_ok)
+                return LevelResult(SILENCE_DBA, float("-inf"), master_db, True, True, ok)
             # no audio this interval -> silence (ears recovering)
-            return LevelResult(SILENCE_DBA, float("-inf"), master_db, True, False, vol_ok)
+            return LevelResult(SILENCE_DBA, float("-inf"), master_db, True, False, ok)
 
         total_ms = 0.0
         for i in range(n_full):
@@ -217,11 +247,11 @@ class LoopbackMeter:
         mean_ms = total_ms / n_full
 
         if mean_ms <= 0 or muted:
-            return LevelResult(SILENCE_DBA, float("-inf"), master_db, True, muted, vol_ok)
+            return LevelResult(SILENCE_DBA, float("-inf"), master_db, True, muted, ok)
 
         dbfs_a = 10.0 * math.log10(mean_ms)
         dba = dbfs_to_dba(dbfs_a, master_db, self.ceiling_db, self.offset_db)
-        return LevelResult(dba, dbfs_a, master_db, False, False, vol_ok)
+        return LevelResult(dba, dbfs_a, master_db, False, False, ok)
 
     def close(self):
         self._teardown_stream()

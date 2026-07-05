@@ -6,7 +6,7 @@ Always-on-top panel: live dBA from the real audio stream, a running daily-dose
 "tank", a rolling graph that shows the dose accumulating and (log-shaped)
 recovering, and a warning when you spend the day's budget.
 
-Drag = move · right-click = menu · Esc = quit
+Drag = move · right-click = menu (Reload / Reset / Quit)
 """
 
 from __future__ import annotations
@@ -232,6 +232,8 @@ class App:
             self.model.reset()
             self.history.clear()
             self.warned_pre = self.warned_full = False
+            self.set_alarm(False)
+            save_state(STATE_PATH, self.model)
 
     def quit(self):
         try:
@@ -255,12 +257,14 @@ class App:
             dt = min(dt, 5.0)   # guard against long stalls / sleep
 
             r = self.meter.poll()
-            dba_for_model = r.dba if not r.silent else 0.0
-            self.model.update(dba_for_model, dt)
+            if r.ok:
+                dba_for_model = r.dba if not r.silent else 0.0
+                self.model.update(dba_for_model, dt)
 
             # history for the graph (1 point per tick)
-            self.history.append((now, r.dba if not r.silent else 0.0, self.model.dose))
-            window = self.s["graph_minutes"] * 60
+            graph_dba = r.dba if (r.ok and not r.silent) else 0.0
+            self.history.append((now, graph_dba, self.model.dose))
+            window = max(1.0, self.s["graph_minutes"] * 60)
             while self.history and now - self.history[0][0] > window:
                 self.history.popleft()
 
@@ -285,19 +289,21 @@ class App:
     def render(self, r):
         dose = self.model.dose
         # header numbers
-        if r.muted:
+        if not r.ok:
+            self.dba_lbl.configure(text="--", fg=FAINT)
+        elif r.muted:
             self.dba_lbl.configure(text="muted", fg=FAINT)
         elif r.silent:
             self.dba_lbl.configure(text="quiet", fg=FAINT)
-        elif not r.ok:
-            self.dba_lbl.configure(text="--", fg=FAINT)
         else:
             self.dba_lbl.configure(text="{:.0f}".format(r.dba), fg=dba_color(r.dba))
         self.dose_lbl.configure(text="{:.0f}%".format(dose * 100), fg=dose_color(dose))
 
         # status line
         p = self.model.params
-        if (not r.silent) and (not r.muted) and r.dba >= p.threshold_db:
+        if not r.ok:
+            self.status.configure(text="-- holding", fg=FAINT)
+        elif (not r.silent) and (not r.muted) and r.dba >= p.threshold_db:
             t = self.model.seconds_to_full(r.dba, self.s["warn_at"])
             self.status.configure(
                 text="▲ spending · full at {}".format(
@@ -342,7 +348,7 @@ class App:
         w = c.winfo_width() or 336
         h = int(c["height"])
         now = time.time()
-        window = self.s["graph_minutes"] * 60
+        window = max(1.0, self.s["graph_minutes"] * 60)
         pts = list(self.history)
         if len(pts) < 2:
             c.create_text(w // 2, h // 2, text="collecting…", fill=FAINT)

@@ -98,6 +98,21 @@ def _num(cp, sec, key, default, cast):
         return default
 
 
+def _clamp_settings(s: dict) -> dict:
+    """Keep hand-edited .ini values in safe ranges so a typo can't crash the app
+    (e.g. exchange_db=0 -> divide-by-zero, or an out-of-range opacity)."""
+    s["poll_ms"] = int(max(100, min(10000, s["poll_ms"])))
+    s["graph_minutes"] = max(1, int(s["graph_minutes"]))
+    s["opacity"] = max(0.2, min(1.0, float(s["opacity"])))
+    s["exchange_db"] = max(0.1, float(s["exchange_db"]))
+    s["criterion_hours"] = max(0.1, float(s["criterion_hours"]))
+    s["recovery_hours"] = max(0.1, float(s["recovery_hours"]))
+    s["recovery_t1_min"] = max(0.01, float(s["recovery_t1_min"]))
+    s["warn_at"] = max(0.05, float(s["warn_at"]))
+    s["prewarn_at"] = max(0.01, min(s["warn_at"], float(s["prewarn_at"])))
+    return s
+
+
 def load_settings(path: str) -> dict:
     s = dict(DEFAULTS)
     if not os.path.exists(path):
@@ -122,7 +137,7 @@ def load_settings(path: str) -> dict:
             if cp.has_option(sec, key):
                 s[key] = _num(cp, sec, key, default, cast)
                 break
-    return s
+    return _clamp_settings(s)
 
 
 def save_settings(path: str, s: dict) -> None:

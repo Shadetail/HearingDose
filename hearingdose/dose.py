@@ -133,7 +133,9 @@ class DoseModel:
             return 1.0
         t1 = p.recovery_t1_min * 60.0
         T = p.recovery_hours * 3600.0
-        span = math.log10(T / t1)
+        if t1 <= 0.0 or T <= 0.0:
+            return 0.0
+        span = math.log10((T + t1) / t1)
         if span <= 0:
             return 0.0
         frac = 1.0 - math.log10((t1 + quiet_s) / t1) / span
@@ -158,7 +160,9 @@ class DoseModel:
             return 0.0
         t1 = p.recovery_t1_min * 60.0
         T = p.recovery_hours * 3600.0
-        span = math.log10(T / t1)
+        if t1 <= 0.0 or T <= 0.0:
+            return 0.0
+        span = math.log10((T + t1) / t1)
         # quiet time at which recovery_fraction == to_fraction
         target_quiet = t1 * (10.0 ** ((1.0 - to_fraction) * span)) - t1
         return max(0.0, target_quiet - self.quiet_seconds)
