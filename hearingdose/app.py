@@ -81,6 +81,38 @@ def fmt_dur(seconds):
     return "{} sec".format(int(round(seconds)))
 
 
+def _dark_titlebar(root):
+    """Ask DWM to draw the native title bar dark (Windows 10 20H1+); without
+    this a dark app gets a glaring white title bar. Harmless no-op elsewhere."""
+    try:
+        import ctypes
+        root.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        on = ctypes.c_int(1)
+        for attr in (20, 19):   # DWMWA_USE_IMMERSIVE_DARK_MODE (19 on older builds)
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(on), ctypes.sizeof(on)) == 0:
+                break
+    except Exception:
+        pass
+
+
+def _clamp_onscreen(x, y, w, h):
+    """Clamp a saved window position into the current virtual desktop, so a
+    position remembered from a since-removed monitor / changed resolution can't
+    restore the window invisibly off-screen."""
+    try:
+        import ctypes
+        gsm = ctypes.windll.user32.GetSystemMetrics
+        vx, vy = gsm(76), gsm(77)     # SM_X/YVIRTUALSCREEN
+        vw, vh = gsm(78), gsm(79)     # SM_CX/CYVIRTUALSCREEN
+    except Exception:
+        return x, y
+    x = max(vx, min(x, vx + vw - w))
+    y = max(vy, min(y, vy + vh - h))
+    return x, y
+
+
 def _hex_to_rgb(h):
     h = h.lstrip("#")
     return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
@@ -187,11 +219,15 @@ class App:
         self.flash = 0
 
         root.title("Hearing Dose")
-        root.overrideredirect(True)
+        root.resizable(False, False)
+        root.protocol("WM_DELETE_WINDOW", self.quit)
+        _dark_titlebar(root)
         self.build_ui()
         self.apply_style()
         self.bind_events()
-        root.geometry("+{}+{}".format(self.s["x"], self.s["y"]))
+        x, y = _clamp_onscreen(self.s["x"], self.s["y"],
+                               root.winfo_reqwidth(), root.winfo_reqheight())
+        root.geometry("+{}+{}".format(x, y))
 
         if selftest:
             root.after(1500, self._selftest_done)
